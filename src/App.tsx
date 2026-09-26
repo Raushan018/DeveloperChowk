@@ -23,6 +23,7 @@ import {
 
 const COMMUNITY_URL = '#'
 const BACKGROUND_IMAGE = '/assets/ChatGPT%20Image%20Sep%2026,%202026,%2001_35_03%20AM.png'
+const BACKGROUND_VIDEO = '/assets/Young_people_working_on_laptops_20260926114459.mp4'
 const YOUTUBE_PLAYLIST_URL = 'https://www.youtube.com/playlist?list=PLQAK-wBEC-Ys'
 const YOUTUBE_EMBED_URL = 'https://www.youtube.com/embed/videoseries?list=PLQAK-wBEC-Ys'
 
@@ -161,7 +162,13 @@ function FeedbackMenu({ onOpen }: { onOpen: () => void }) {
   const feedbackRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    const stored = JSON.parse(localStorage.getItem(FEEDBACK_STORAGE_KEY) || '[]') as FeedbackEntry[]
+    let stored: FeedbackEntry[] = []
+    try {
+      const parsed = JSON.parse(localStorage.getItem(FEEDBACK_STORAGE_KEY) || '[]')
+      if (Array.isArray(parsed)) stored = parsed as FeedbackEntry[]
+    } catch {
+      localStorage.removeItem(FEEDBACK_STORAGE_KEY)
+    }
     const fresh = stored.filter((entry) => Date.now() - entry.createdAt < FEEDBACK_MAX_AGE)
     setFeedback(fresh)
     localStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(fresh))
@@ -190,7 +197,7 @@ function FeedbackMenu({ onOpen }: { onOpen: () => void }) {
 
   return (
     <div className="feedback-menu" ref={feedbackRef}>
-      <button className="feedback-button" onClick={() => { onOpen(); setIsOpen((open) => !open) }} aria-expanded={isOpen}><MessageSquareText size={16} /> Feedback</button>
+      <button type="button" className="feedback-button" onClick={() => { onOpen(); setIsOpen((open) => !open) }} aria-expanded={isOpen}><MessageSquareText size={16} /> Feedback</button>
       {isOpen && <div className="feedback-panel">
         <form onSubmit={submitFeedback}>
           <input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" aria-label="Your name" />
@@ -275,11 +282,12 @@ function MusicPlayer() {
   const [showYouTubePlaylist, setShowYouTubePlaylist] = useState(true)
   const [selectedYouTubeId, setSelectedYouTubeId] = useState<string>(YOUTUBE_TRACKS[0][0])
   const [youtubeReady, setYoutubeReady] = useState(false)
+  const [youtubeNowPlayingTitle, setYoutubeNowPlayingTitle] = useState('')
   const [playlistMode, setPlaylistMode] = useState<PlaylistMode>('cooking')
   const activeYouTubeTracks: readonly YouTubeTrack[] = playlistMode === 'stuck' ? BUG_STUCK_TRACKS : playlistMode === 'deployed' ? DEPLOYED_TRACKS : YOUTUBE_TRACKS
   const track = tracks[trackIndex]
   const selectedYouTubeTrack = activeYouTubeTracks.find(([id]) => id === selectedYouTubeId)
-  const activeTitle = showYouTubePlaylist && selectedYouTubeTrack ? selectedYouTubeTrack[1] : track.title
+  const activeTitle = showYouTubePlaylist ? selectedYouTubeTrack?.[1] || youtubeNowPlayingTitle || 'Loading song...' : track.title
   const activeArtist = showYouTubePlaylist ? 'Raushan.exe' : track.artist
   const activeCover = showYouTubePlaylist && selectedYouTubeTrack ? `https://i.ytimg.com/vi/${selectedYouTubeTrack[0]}/hqdefault.jpg` : track.cover
   const playerDuration = showYouTubePlaylist ? duration : duration || durationFromLabel(track.fallbackDuration)
@@ -304,6 +312,7 @@ function MusicPlayer() {
     setYoutubeReady(false)
     setCurrent(0)
     setDuration(0)
+    setYoutubeNowPlayingTitle('')
   }, [selectedYouTubeId])
 
   const sendYouTubeCommand = (func: string, args: unknown[] = []) => {
@@ -351,22 +360,22 @@ function MusicPlayer() {
   useEffect(() => {
     const handleYouTubeMessage = (event: MessageEvent) => {
       if (event.origin !== 'https://www.youtube-nocookie.com' && event.origin !== 'https://www.youtube.com') return
-      let data: { event?: string; info?: { currentTime?: number; duration?: number; playerState?: number } | number }
+      let data: { event?: string; info?: { currentTime?: number; duration?: number; playerState?: number; videoData?: { video_id?: string; title?: string } } | number }
       try {
         data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data
       } catch {
         return
       }
       if (data.event !== 'infoDelivery' || typeof data.info !== 'object' || data.info === null) return
+      if (data.info.videoData?.video_id) {
+        const playingId = data.info.videoData.video_id
+        if (activeYouTubeTracks.some(([id]) => id === playingId) && playingId !== selectedYouTubeId) setSelectedYouTubeId(playingId)
+        if (data.info.videoData.title) setYoutubeNowPlayingTitle(data.info.videoData.title)
+      }
       if (typeof data.info.currentTime === 'number') setCurrent(data.info.currentTime)
       if (typeof data.info.duration === 'number') setDuration(data.info.duration)
       if (typeof data.info.playerState === 'number') {
         setIsPlaying(data.info.playerState === 1)
-        if (data.info.playerState === 0) {
-          const nextId = randomTrackId(activeYouTubeTracks, selectedYouTubeId)
-          youtubeReadyRef.current = false
-          setSelectedYouTubeId(nextId)
-        }
       }
     }
     window.addEventListener('message', handleYouTubeMessage)
@@ -383,6 +392,28 @@ function MusicPlayer() {
     }, 500)
     return () => window.clearInterval(poll)
   }, [showYouTubePlaylist, selectedYouTubeId, youtubeReady])
+
+  useEffect(() => {
+    const resumePlayback = () => {
+      if (document.visibilityState !== 'visible' || !isPlaying) return
+      if (showYouTubePlaylist) {
+        sendYouTubeCommand('playVideo')
+      } else {
+        void audioRef.current?.play().catch(() => undefined)
+      }
+    }
+    document.addEventListener('visibilitychange', resumePlayback)
+    return () => document.removeEventListener('visibilitychange', resumePlayback)
+  }, [isPlaying, showYouTubePlaylist])
+
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    navigator.mediaSession.metadata = new MediaMetadata({ title: activeTitle, artist: activeArtist, artwork: [{ src: activeCover }] })
+    navigator.mediaSession.setActionHandler('play', () => { sendYouTubeCommand('playVideo'); void audioRef.current?.play().catch(() => undefined); setIsPlaying(true) })
+    navigator.mediaSession.setActionHandler('pause', () => { sendYouTubeCommand('pauseVideo'); audioRef.current?.pause(); setIsPlaying(false) })
+    navigator.mediaSession.setActionHandler('nexttrack', () => changeTrack(1))
+    navigator.mediaSession.setActionHandler('previoustrack', () => changeTrack(-1))
+  }, [activeTitle, activeArtist, activeCover])
 
   const togglePlay = () => {
     if (showYouTubePlaylist) {
@@ -455,15 +486,15 @@ function MusicPlayer() {
           <button className="youtube-button" onClick={() => setShowYouTubePlaylist((visible) => !visible)}><ExternalLink size={13} /> YouTube playlist</button>
         </div>
         {tracks.length > 1 && <div className="playlist-list">{tracks.map((item, index) => <button key={`${item.audio}-${index}`} className={index === trackIndex ? 'active' : ''} onClick={() => { setTrackIndex(index); setIsPlaying(false) }}>{index + 1}. {item.title}</button>)}</div>}
-        {showYouTubePlaylist && <div className="youtube-frame"><iframe key={`${playlistMode}-${selectedYouTubeId}`} ref={youtubeFrameRef} onLoad={handleYouTubeLoad} referrerPolicy="strict-origin-when-cross-origin" title="YouTube playlist player" src={`https://www.youtube-nocookie.com/embed/${selectedYouTubeId}?list=${playlistMode === 'stuck' ? 'PL0umg_TNpoZTTdZVIi5tfX69pRmoMFGna' : playlistMode === 'deployed' ? 'PLlhSyXK6xj7oxpgyPZcV4gFzw50oVclAr' : 'PLQAK-wBEC-Ys'}&controls=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&modestbranding=1&playsinline=1`} allow="autoplay; encrypted-media" /><div className="youtube-track-list">{activeYouTubeTracks.map(([id, title], index) => <button key={`${id}-${index}`} className={id === selectedYouTubeId ? 'active' : ''} onClick={() => { youtubeReadyRef.current = false; setYoutubeReady(false); setSelectedYouTubeId(id); setShowYouTubePlaylist(true); setIsPlaying(false) }}><span>{String(index + 1).padStart(2, '0')}</span>{title}</button>)}</div><a href={playlistMode === 'stuck' ? 'https://youtube.com/playlist?list=PL0umg_TNpoZTTdZVIi5tfX69pRmoMFGna' : playlistMode === 'deployed' ? 'https://youtube.com/playlist?list=PLlhSyXK6xj7oxpgyPZcV4gFzw50oVclAr' : YOUTUBE_PLAYLIST_URL} target="_blank" rel="noreferrer">Open full playlist <ExternalLink size={11} /></a></div>}
+        {showYouTubePlaylist && <div className="youtube-frame"><iframe key={`${playlistMode}-${selectedYouTubeId}`} ref={youtubeFrameRef} onLoad={handleYouTubeLoad} referrerPolicy="strict-origin-when-cross-origin" title="YouTube playlist player" src={`https://www.youtube-nocookie.com/embed/${selectedYouTubeId}?list=${playlistMode === 'stuck' ? 'PL0umg_TNpoZTTdZVIi5tfX69pRmoMFGna' : playlistMode === 'deployed' ? 'PLlhSyXK6xj7oxpgyPZcV4gFzw50oVclAr' : 'PLQAK-wBEC-Ys'}&controls=1&enablejsapi=1&origin=${encodeURIComponent(window.location.origin)}&modestbranding=1&playsinline=1`} allow="autoplay; encrypted-media; picture-in-picture" /><div className="youtube-track-list">{activeYouTubeTracks.map(([id, title], index) => <button key={`${id}-${index}`} className={id === selectedYouTubeId ? 'active' : ''} onClick={() => { youtubeReadyRef.current = false; setYoutubeReady(false); setSelectedYouTubeId(id); setShowYouTubePlaylist(true); setIsPlaying(false) }}><span>{String(index + 1).padStart(2, '0')}</span>{title}</button>)}</div><a href={playlistMode === 'stuck' ? 'https://youtube.com/playlist?list=PL0umg_TNpoZTTdZVIi5tfX69pRmoMFGna' : playlistMode === 'deployed' ? 'https://youtube.com/playlist?list=PLlhSyXK6xj7oxpgyPZcV4gFzw50oVclAr' : YOUTUBE_PLAYLIST_URL} target="_blank" rel="noreferrer">Open full playlist <ExternalLink size={11} /></a></div>}
       </div>
       <div className="music-player">
-      <audio ref={audioRef} src={track.audio} autoPlay={!showYouTubePlaylist} onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)} onTimeUpdate={(event) => setCurrent(event.currentTarget.currentTime)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onEnded={() => changeTrack(1)} onError={() => setHasError(true)} />
+      <audio ref={audioRef} src={track.audio} preload="auto" autoPlay={!showYouTubePlaylist} onLoadedMetadata={(event) => setDuration(event.currentTarget.duration)} onTimeUpdate={(event) => setCurrent((previous) => Math.abs(previous - event.currentTarget.currentTime) >= 0.25 ? event.currentTarget.currentTime : previous)} onPlay={() => setIsPlaying(true)} onPause={() => setIsPlaying(false)} onEnded={() => changeTrack(1)} onError={() => setHasError(true)} />
       <div className="track-summary">
-        <motion.div className={`album-art ${isPlaying ? 'spinning' : ''}`} animate={isPlaying ? { rotate: 360 } : { rotate: 0 }} transition={isPlaying ? { repeat: Infinity, duration: 14, ease: 'linear' } : { duration: 0.4 }}>
+        <div className={`album-art ${isPlaying ? 'spinning' : ''}`}>
           <img src={activeCover} alt="Current song artwork" />
           <span className="album-hole" />
-        </motion.div>
+        </div>
         <div className="track-copy">
           <h3>{activeTitle}</h3>
           <p>{activeArtist}</p>
@@ -509,8 +540,8 @@ export default function App() {
   }
 
   return (
-    <main className="app-shell" style={{ '--background-image': `url("${BACKGROUND_IMAGE}")` } as CSSProperties}>
-      <div className="background-layer" />
+    <main className="app-shell">
+      <video className="background-layer" src={BACKGROUND_VIDEO} autoPlay loop muted playsInline aria-hidden="true" />
       <div className="vignette" />
       <RainOverlay enabled={rainMood} />
       <div className="top-actions" ref={topActionsRef}>
